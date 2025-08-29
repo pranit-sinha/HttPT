@@ -1,7 +1,10 @@
 import requests
 from fastapi import FastAPI, HTTPException
 from contextlib import asynccontextmanager
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+import base64
+from io import BytesIO
+from PIL import Image
 from transformers import pipeline
 
 class ModelRegistry:
@@ -36,10 +39,19 @@ async def lifespan(app: FastAPI):
     yield
     models.shutdown()
 
-app = FastAPI(version="0.2.0", lifespan=lifespan)
+app = FastAPI(version="0.2.1", lifespan=lifespan)
 
 class InferenceRequest(BaseModel):
-    text: str
+    input: str
+    datatype: str
+
+    @field_validator('datatype', mode='after')
+
+    @classmethod
+    def validate(cls, v):
+        if v not in ['text', 'image']:
+            raise ValueError('Only text and image supported currently.')
+        return v
 
 class InferenceResponse(BaseModel):
     service: str
@@ -53,7 +65,12 @@ async def root():
 async def predict(service: str, request: InferenceRequest):
     model = models.backends.get(service)
     try:
-        result = model(request.text)
+        if request.datatype == 'image':
+            raw = base64.b64decode(request.input)
+            img = Image.open(BytesIO(raw))
+            result = model(img)
+        else:
+            result = model(request.input)
     except Exception:
         raise HTTPException(status_code=500, detail="Inference failed.")
 
