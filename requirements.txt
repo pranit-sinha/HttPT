@@ -1,3 +1,7 @@
 fastapi
+fastapi[standard]
+pydantic
 uvicorn
 transformers
+accelerate
+# torch
