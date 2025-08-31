@@ -6,4 +6,5 @@ transformers
 accelerate
 pillow
 circuitbreaker
+cachetools
 # torch
