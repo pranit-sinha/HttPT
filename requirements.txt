@@ -5,4 +5,5 @@ uvicorn
 transformers
 accelerate
 pillow
+circuitbreaker
 # torch

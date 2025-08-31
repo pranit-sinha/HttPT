@@ -6,6 +6,12 @@ import base64
 from io import BytesIO
 from PIL import Image
 from transformers import pipeline
+from functools import lru_cache
+from circuitbreaker import circuit
+import logging
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(filename='main.log', level=logging.INFO)
 
 class ModelRegistry:
     def __init__(self):
@@ -39,7 +45,7 @@ async def lifespan(app: FastAPI):
     yield
     models.shutdown()
 
-app = FastAPI(version="0.2.1", lifespan=lifespan)
+app = FastAPI(version="0.2.2", lifespan=lifespan)
 
 class InferenceRequest(BaseModel):
     input: str
@@ -61,17 +67,24 @@ class InferenceResponse(BaseModel):
 async def root():
     return {"message": "App running"}
 
+@lru_cache
+@circuit
 @app.post("/inference/{service}", response_model=InferenceResponse)
 async def predict(service: str, request: InferenceRequest):
     model = models.backends.get(service)
     try:
         if request.datatype == 'image':
+            logger.info('vit-base-patch16-224 called')
             raw = base64.b64decode(request.input)
             img = Image.open(BytesIO(raw))
             result = model(img)
         else:
+            logger.info('distilbert-base-uncased-finetuned-sst-2-english called')
             result = model(request.input)
     except Exception:
         raise HTTPException(status_code=500, detail="Inference failed.")
 
+    logger.info(f'Cache hits: {predict.cache_info().hits}, misses: {predict.cache_info().misses}')
+
     return InferenceResponse(service=service, preds=result if isinstance(result, list) else [result])
+
