@@ -1,4 +1,7 @@
 import requests
+import asyncio
+from datetime import datetime, timedelta
+from typing import List, Tuple
 from fastapi import FastAPI, HTTPException
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, field_validator
@@ -15,11 +18,43 @@ import logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(filename='main.log', level=logging.INFO)
 
+class BatchProcessor: 
+    def __init__(self, batchsize: int = 16, wait: int = 100): 
+        self.batchsize = max_batchsize
+        self.wait = wait
+        self.queue = asyncio.Queue()
+        self.results = {}
+        self.processing = False
+
+    def get_reqs(self, req_id: str, service: str, input: str, dtype: str):
+        self.queue.put((req_id, service, input, dtype))
+
+    def fill_batch(self, models):
+        batch = []
+        for i in range(self.batchsize):
+            item = self.queue.get()
+            batch.append(item)
+        process_batch()
+
+    def process_batch(self, batch, models):
+        group_by_service = {}
+        for req_id, service, input, dtype in batch:
+            if dtype == "text":
+                group_by_service[service]["text"].append(input)
+            else:
+
+                group_by_service[service]["image"].append(input)
+        
+        for service, data in group_by_service.items():
+            model = models.backends[service]
+            result = model(data["texts"] if data["texts"] else data["images"])
+
 class ModelRegistry:
     def __init__(self):
         self.backends = {}
         self.cache = TTLCache(maxsize=100, ttl=300)
         self.cache_info = {"hits": 0, "misses": 0}
+        self.batch_processor = BatchProcessor()
         self.config = {
                 "sentiment-analysis": {
                     "name": "distilbert-base-uncased-finetuned-sst-2-english",
