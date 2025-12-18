@@ -18,36 +18,76 @@ import logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(filename='main.log', level=logging.INFO)
 
-class BatchProcessor: 
-    def __init__(self, batchsize: int = 16, wait: int = 100): 
-        self.batchsize = max_batchsize
-        self.wait = wait
+class BatchProcessor:
+    def __init__(self, batchsize: int = 16, wait: float = 0.1):
+        self.batchsize = batchsize
+        self.wait = wait 
         self.queue = asyncio.Queue()
         self.results = {}
         self.processing = False
-
-    def get_reqs(self, req_id: str, service: str, input: str, dtype: str):
-        self.queue.put((req_id, service, input, dtype))
-
-    def fill_batch(self, models):
-        batch = []
-        for i in range(self.batchsize):
-            item = self.queue.get()
-            batch.append(item)
-        process_batch()
-
-    def process_batch(self, batch, models):
+        
+    async def get_reqs(self, req_id: str, service: str, input: str, dtype: str) -> dict:
+        future = asyncio.get_running_loop().create_future()
+        self.results[req_id] = future
+        await self.queue.put((req_id, service, input, dtype, future))
+        return await future
+    
+    async def fill_batch(self, models):
+        while True:
+            batch = []
+            start_time = datetime.now()
+            
+            try:
+                first_item = await asyncio.wait_for(self.queue.get(), timeout=5.0)
+                batch.append(first_item)
+            except asyncio.TimeoutError:
+                continue
+                
+            while len(batch) < self.batchsize:
+                try:
+                    timeout = self.wait - (datetime.now() - start_time).total_seconds()
+                    if timeout <= 0:
+                        break
+                    item = await asyncio.wait_for(self.queue.get(), timeout=timeout)
+                    batch.append(item)
+                except asyncio.TimeoutError:
+                    break
+            
+            if batch:
+                await self.process_batch(batch, models)
+    
+    async def process_batch(self, batch: List, models):
         group_by_service = {}
-        for req_id, service, input, dtype in batch:
+        for req_id, service, input, dtype, future in batch:
+            if service not in group_by_service:
+                group_by_service[service] = {"texts": [], "images": [], "futures": [], "req_ids": []}
+            
             if dtype == "text":
-                group_by_service[service]["text"].append(input)
-            else:
-
-                group_by_service[service]["image"].append(input)
+                group_by_service[service]["texts"].append(input)
+                group_by_service[service]["futures"].append(future)
+                group_by_service[service]["req_ids"].append(req_id)
+            else:  
+                group_by_service[service]["images"].append(input)
+                group_by_service[service]["futures"].append(future)
+                group_by_service[service]["req_ids"].append(req_id)
         
         for service, data in group_by_service.items():
-            model = models.backends[service]
-            result = model(data["texts"] if data["texts"] else data["images"])
+            if data["texts"]:
+                model = models.backends[service]
+                try:
+                    results = model(data["texts"])
+                    for future, result in zip(data["futures"], results):
+                        future.set_result(result)
+                except Exception as e:
+                    for future in data["futures"]:
+                        future.set_exception(e)
+            
+            for i, img_data in enumerate(data["images"]):
+                try:
+                    result = models.predict(service, img_data, "image")
+                    data["futures"][i].set_result(result)
+                except Exception as e:
+                    data["futures"][i].set_exception(e)
 
 class ModelRegistry:
     def __init__(self):
