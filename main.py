@@ -14,6 +14,7 @@ import hashlib
 import json
 from circuitbreaker import circuit
 import logging
+import uuid
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(filename='main.log', level=logging.INFO)
@@ -26,10 +27,10 @@ class BatchProcessor:
         self.results = {}
         self.processing = False
         
-    async def get_req(self, req_id: str, service: str, input: str, dtype: str) -> dict:
+    async def get_req(self, req_id: str, service: str, input: str, datatype: str) -> dict:
         future = asyncio.get_running_loop().create_future()
         self.results[req_id] = future
-        await self.queue.put((req_id, service, input, dtype, future))
+        await self.queue.put((req_id, service, input, datatype, future))
         return await future
     
     async def fill_batch(self, models):
@@ -58,11 +59,11 @@ class BatchProcessor:
     
     async def process_batch(self, batch: List, models):
         group_by_service = {}
-        for req_id, service, input, dtype, future in batch:
+        for req_id, service, input, datatype, future in batch:
             if service not in group_by_service:
                 group_by_service[service] = {"texts": [], "images": [], "futures": [], "req_ids": []}
             
-            if dtype == "text":
+            if datatype == "text":
                 group_by_service[service]["texts"].append(input)
                 group_by_service[service]["futures"].append(future)
                 group_by_service[service]["req_ids"].append(req_id)
@@ -113,7 +114,7 @@ class ModelRegistry:
             except Exception:
                 raise RuntimeError("Failed to load ", service)
         loop = asyncio.get_event_loop()
-        self.batch_task = loop.create_task(self.batch_processor.start_processor(self))
+        self.batch_task = loop.create_task(self.batch_processor.fill_batch(self))
 
     def shutdown(self):
         if hasattr(self, 'batch_task'):
@@ -180,6 +181,18 @@ async def predict(service: str, request: InferenceRequest):
     try:
         result = models.predict(service, request.input, request.datatype)
     except Exception:
+        raise HTTPException(status_code=500, detail="inference failed.")
+
+    return InferenceResponse(service=service, preds=result if isinstance(result, list) else [result])
+
+@app.post("/inference/{service}/batch", response_model=InferenceResponse)
+async def batch_predict(service: str, request: InferenceRequest):
+    if service not in models.backends:
+        raise HTTPException(status_code=404, detail="Service not found.")
+    request_id = str(uuid.uuid4())
+    try:
+        result = await models.batch_processor.get_req(request_id, service, request.input, request.datatype)
+    except Exception as e:
         raise HTTPException(status_code=500, detail="inference failed.")
 
     return InferenceResponse(service=service, preds=result if isinstance(result, list) else [result])
