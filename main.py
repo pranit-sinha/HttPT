@@ -26,7 +26,7 @@ class BatchProcessor:
         self.results = {}
         self.processing = False
         
-    async def get_reqs(self, req_id: str, service: str, input: str, dtype: str) -> dict:
+    async def get_req(self, req_id: str, service: str, input: str, dtype: str) -> dict:
         future = asyncio.get_running_loop().create_future()
         self.results[req_id] = future
         await self.queue.put((req_id, service, input, dtype, future))
@@ -112,8 +112,12 @@ class ModelRegistry:
                 self.backends[service] = pipeline(task=config["task"], model=config["name"], device=0)
             except Exception:
                 raise RuntimeError("Failed to load ", service)
+        loop = asyncio.get_event_loop()
+        self.batch_task = loop.create_task(self.batch_processor.start_processor(self))
 
     def shutdown(self):
+        if hasattr(self, 'batch_task'):
+            self.batch_task.cancel()
         logger.info(f'Cache hits: {self.cache_info["hits"]}, misses: {self.cache_info["misses"]}')    
         self.backends.clear()
 
