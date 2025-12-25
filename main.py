@@ -1,10 +1,11 @@
 import requests
 import asyncio
 from datetime import datetime, timedelta
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from contextlib import asynccontextmanager
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, Field
 import base64
 from io import BytesIO
 from PIL import Image
@@ -15,6 +16,15 @@ import json
 from circuitbreaker import circuit
 import logging
 import uuid
+import os
+import uvicorn
+
+from llm_provide import GeminiBackend, LLMManager
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+LLM_MODELS = {
+    "gemini-2.5-flash": GeminiBackend("gemini-2.5-flash", GEMINI_API_KEY),
+}
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(filename='main.log', level=logging.INFO)
@@ -106,6 +116,7 @@ class ModelRegistry:
                     "task": "image-classification"
                     }
                 }
+        self.llm_manager = LLMManager()
 
     def bootstrap(self):
         for service, config in self.config.items():
@@ -115,6 +126,13 @@ class ModelRegistry:
                 raise RuntimeError("Failed to load ", service)
         loop = asyncio.get_event_loop()
         self.batch_task = loop.create_task(self.batch_processor.fill_batch(self))
+        for model_name, backend in LLM_MODELS.items():
+            if backend.api_key:
+                self.llm_manager.register_provider(model_name, backend)
+                print("Registered LLM backend: ", model_name)
+
+        # use gemini 2.5 as default in testbed
+        self.llm_manager.default_model = "gemini-2.5-flash"
 
     def shutdown(self):
         if hasattr(self, 'batch_task'):
@@ -143,6 +161,23 @@ class ModelRegistry:
 
         self.cache[key] = result
         return result
+
+class ChatMessage(BaseModel):
+    role: str = Field(description="Role: system, user, or assistant")
+    content: str = Field(description="Message content")
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage]
+    model: Optional[str] = Field(None, description="Model to use (default: gemini-2.5-flash)")
+    temperature: float = Field(0.2, ge=0.0, le=2.0, description="Temperature for sampling")
+    top_p: float = Field(0.9, ge=0.0, le=1.0, description="Threshold for top-p sampling")
+    max_tokens: int = Field(1000, gt=0, le=4000, description="Maximum tokens to generate")
+    stream: bool = Field(False, description="Stream response")
+
+class ChatResponse(BaseModel):
+    content: str
+    model: str
+    usage: dict
 
 models = ModelRegistry()
 
@@ -197,3 +232,54 @@ async def batch_predict(service: str, request: InferenceRequest):
 
     return InferenceResponse(service=service, preds=result if isinstance(result, list) else [result])
 
+@app.post("/responses", response_model=ChatResponse)
+async def chat_completions(request: ChatRequest):
+    backend = models.llm_manager.get_provider(request.model)
+    if not backend:
+        raise HTTPException(status_code=404, detail=f"Model {request.model} not available")
+    
+    try:
+        result = await backend.generate(
+            input=[msg.dict() for msg in request.messages],
+            temperature=request.temperature,
+            top_p = request.top_p,
+            max_tokens=request.max_tokens,
+            stream=False
+        )
+        
+        return ChatResponse(**result) if isinstance(result, dict) else result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"LLM call failed: {str(e)}")
+
+@app.post("/responses/stream")
+async def chat_completions_stream(request: ChatRequest):
+    backend = models.llm_manager.get_provider(request.model)
+    if not backend:
+        raise HTTPException(status_code=404, detail=f"Model {request.model} not available")
+    
+    async def event_generator():
+        try:
+            stream = await backend.generate(
+                input=[msg.dict() for msg in request.messages],
+                temperature=request.temperature,
+                top_p = request.top_p,
+                max_tokens=request.max_tokens,
+                stream=True
+            )
+            
+            async for chunk in stream:
+                yield f"data: {chunk.text if hasattr(chunk, 'text') else chunk}\n\n"
+            
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            yield f"data: {{\"error\": \"{str(e)}\"}}\n\n"
+    
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.get("/llm/costs")
+async def get_llm_costs():
+    return models.llm_manager.get_cost_report()
+
+@app.get("/llm/models")
+async def list_llm_models():
+    return {"models": list(models.llm_manager.providers.keys())}

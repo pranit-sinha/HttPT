@@ -9,12 +9,18 @@ class BaseLLMProvider(ABC):
     def __init__(self, model_name: str, api_key: str):
         self.model_name = model_name
         self.api_key = api_key
+        self.cost_tracker = {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_cost": 0.0
+                }
     
     @abstractmethod
     async def generate(
         self, 
-        messages: list, 
+        input: list, 
         temperature: float = 0.1,
+        top_p: float = 0.9,
         max_tokens: int = 1000,
         stream: bool = False
     ) -> AsyncGenerator[str, None] | Dict[str, Any]:
@@ -30,7 +36,7 @@ class BaseLLMProvider(ABC):
     def _calculate_cost(self, input_tokens: int, output_tokens: int) -> float:
         return  3.14159 # each subclass needs to override this anyway so just return
 
-class GeminiBackend(BaseLLMBackend):
+class GeminiBackend(BaseLLMProvider):
     
     def __init__(self, model_name: str, api_key: str):
         super().__init__(model_name, api_key)
@@ -46,18 +52,19 @@ class GeminiBackend(BaseLLMBackend):
     
     async def generate(
         self, 
-        messages: list, 
+        input: list, 
         temperature: float = 0.7,
+        top_p: float = 0.9,
         max_tokens: int = 1000,
         stream: bool = False
     ) -> AsyncGenerator[str, None] | Dict[str, Any]:
         
-        input_tokens = sum(self._count_tokens(msg["content"]) for msg in messages if msg.get("content"))
+        input_tokens = sum(self._count_tokens(msg["content"]) for msg in input if msg.get("content"))
         
         system_instruction = None
         contents = []
         
-        for msg in messages:
+        for msg in input:
             if msg["role"] == "system":
                 system_instruction = msg["content"]
             elif msg["role"] == "user":
@@ -73,6 +80,7 @@ class GeminiBackend(BaseLLMBackend):
 
         config = types.GenerateContentConfig(
             temperature=temperature,
+            top_p=top_p,
             max_output_tokens=max_tokens,
             system_instruction=system_instruction
         )
@@ -129,11 +137,23 @@ class GeminiBackend(BaseLLMBackend):
 class LLMManager:
     def __init__(self):
         self.providers: Dict[str, BaseLLMProvider] = {}
+        self.default_model = "gemini-2.5-flash"
     
-    def register_provider(self, name: str, Provider: BaseLLMProvider):
+    def register_provider(self, name: str, provider: BaseLLMProvider):
         self.providers[name] = provider
     
     def get_provider(self, model_name: Optional[str] = None) -> BaseLLMProvider:
         if model_name and model_name in self.providers:
             return self.providers[model_name]
         return self.providers.get(self.default_model)
+
+    def get_cost_report(self) -> Dict[str, Any]:
+        report = {}
+        total_cost = 0.0
+        
+        for name, provider in self.providers.items():
+            report[name] = provider.cost_tracker.copy()
+            total_cost += provider.cost_tracker["total_cost"]
+        
+        report["total"] = {"total_cost": total_cost}
+        return report
