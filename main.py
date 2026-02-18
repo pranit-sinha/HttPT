@@ -20,11 +20,26 @@ import os
 import uvicorn
 
 from llm_provide import GeminiBackend, LLMManager
+from compliance_routes import (
+    router as compliance_router,
+    ComplianceService,
+    set_service,
+)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 LLM_MODELS = {
     "gemini-2.5-flash": GeminiBackend("gemini-2.5-flash", GEMINI_API_KEY),
 }
+
+OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "localhost")
+OPENSEARCH_PORT = int(os.getenv("OPENSEARCH_PORT", "9200"))
+OPENSEARCH_USER = os.getenv("OPENSEARCH_USER", "admin")
+OPENSEARCH_PASS = os.getenv("OPENSEARCH_PASS", "admin")
+OPENSEARCH_SSL = os.getenv("OPENSEARCH_SSL", "true").lower() == "true"
+OPENSEARCH_VERIFY_CERTS = os.getenv("OPENSEARCH_VERIFY_CERTS", "false").lower() == "true"
+COMPLIANCE_INDEX = os.getenv("COMPLIANCE_INDEX", "compliance_documents")
+COMPLIANCE_RERANKER = os.getenv("COMPLIANCE_RERANKER", "true").lower() == "true"
+MAX_CONCURRENT_AUDITS = int(os.getenv("MAX_CONCURRENT_AUDITS", "4"))
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(filename='main.log', level=logging.INFO)
@@ -133,6 +148,26 @@ class ModelRegistry:
 
         # use gemini 2.5 as default in testbed
         self.llm_manager.default_model = "gemini-2.5-flash"
+
+        try:
+            self.compliance_service = ComplianceService(
+                opensearch_host=OPENSEARCH_HOST,
+                opensearch_port=OPENSEARCH_PORT,
+                opensearch_auth=(OPENSEARCH_USER, OPENSEARCH_PASS),
+                opensearch_ssl=OPENSEARCH_SSL,
+                opensearch_verify_certs=OPENSEARCH_VERIFY_CERTS,
+                index_name=COMPLIANCE_INDEX,
+                enable_reranker=COMPLIANCE_RERANKER,
+                max_concurrent_audits=MAX_CONCURRENT_AUDITS,
+            )
+            self.compliance_service.bootstrap(self.llm_manager)
+            set_service(self.compliance_service)
+            logger.info("Compliance service initialized")
+        except Exception:
+            logger.exception(
+                "Compliance service failed to initialize — "
+                "gateway continues without it"
+            )
 
     def shutdown(self):
         if hasattr(self, 'batch_task'):
